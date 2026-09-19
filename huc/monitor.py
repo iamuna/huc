@@ -21,8 +21,8 @@ class ProcessUsage:
     gpu_mem_mb: float | None
     net_down_mbps: float
     net_up_mbps: float
-    disk_read_mbps: float
-    disk_write_mbps: float
+    io_read_mbps: float
+    io_write_mbps: float
     threads: int
     verification_state: str
     verification_details: str
@@ -85,6 +85,7 @@ class ProcessSampler:
                 threads = int(proc.info.get("num_threads") or 0)
 
                 read_rate = write_rate = 0.0
+                io_available = False
                 try:
                     io = proc.io_counters()
                     previous = self._last_io.get(pid)
@@ -92,6 +93,7 @@ class ProcessSampler:
                         dt = max(0.001, now - previous[0])
                         read_rate = max(0, io.read_bytes - previous[1]) / dt / 1024 / 1024
                         write_rate = max(0, io.write_bytes - previous[2]) / dt / 1024 / 1024
+                        io_available = True
                     self._last_io[pid] = (now, io.read_bytes, io.write_bytes)
                 except (psutil.AccessDenied, psutil.NoSuchProcess, AttributeError):
                     pass
@@ -121,6 +123,10 @@ class ProcessSampler:
                     windows_ram_mb=w.working_set_mb if w else None,
                     gpu_primary=gpu_primary,
                     gpu_secondary=gpu_secondary,
+                    psutil_io_read_mbps=read_rate if io_available else None,
+                    windows_io_read_mbps=w.io_read_mbps if w else None,
+                    psutil_io_write_mbps=write_rate if io_available else None,
+                    windows_io_write_mbps=w.io_write_mbps if w else None,
                     network_events_lost=lost_for_process,
                 )
 
@@ -138,8 +144,8 @@ class ProcessSampler:
                         ),
                         net_down_mbps=net_down,
                         net_up_mbps=net_up,
-                        disk_read_mbps=read_rate,
-                        disk_write_mbps=write_rate,
+                        io_read_mbps=read_rate,
+                        io_write_mbps=write_rate,
                         threads=threads,
                         verification_state=assessment.state,
                         verification_details=assessment.details,
