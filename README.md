@@ -10,6 +10,7 @@ HUC is a Windows-first local process monitor and executable blocker.
 - End a selected process
 - Persistent blocklist using exact executable path + SHA-256
 - Optional HUC Guard scheduled task that starts at logon and terminates matching blocked executables
+- Built-in uninstaller plus standalone `uninstall_huc.ps1`
 - Protected-process denylist for core Windows components
 - Blocklist: `%ProgramData%\HUC\blocklist.json`
 - Guard log: `%ProgramData%\HUC\guard.log`
