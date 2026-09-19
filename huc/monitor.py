@@ -6,7 +6,9 @@ from dataclasses import dataclass
 import psutil
 
 from .blocklist import BlockList
-from .gpu import NvidiaGpuSampler
+from .counters import WindowsProcessCounterSampler, assess_counters
+from .gpu import GpuSampler
+from .network import NetworkEtwSampler
 
 
 @dataclass
@@ -16,10 +18,14 @@ class ProcessUsage:
     cpu_percent: float
     ram_mb: float
     gpu_percent: float | None
-    gpu_mem_percent: float | None
+    gpu_mem_mb: float | None
+    net_down_mbps: float
+    net_up_mbps: float
     disk_read_mbps: float
     disk_write_mbps: float
     threads: int
+    verification_state: str
+    verification_details: str
     path: str
     blocked: bool
 
@@ -27,17 +33,36 @@ class ProcessUsage:
 class ProcessSampler:
     def __init__(self, blocklist: BlockList | None = None) -> None:
         self.blocklist = blocklist or BlockList()
-        self.gpu = NvidiaGpuSampler()
+        self.gpu = GpuSampler()
+        self.network = NetworkEtwSampler()
+        self.windows = WindowsProcessCounterSampler()
         self._last_io: dict[int, tuple[float, int, int]] = {}
         self._known: dict[int, psutil.Process] = {}
 
     @property
     def gpu_source(self) -> str:
-        return "NVIDIA nvidia-smi" if self.gpu.available else "Unavailable"
+        return self.gpu.source
+
+    @property
+    def network_source(self) -> str:
+        health = self.network.health
+        if not health.available:
+            return f"Unavailable ({health.error or 'ETW not started'})"
+        if health.events_lost:
+            return f"{health.source} ({health.events_lost} lost)"
+        return health.source
+
+    @property
+    def verification_source(self) -> str:
+        return self.windows.source
 
     def sample(self) -> list[ProcessUsage]:
         now = time.monotonic()
         gpu = self.gpu.sample()
+        network = self.network.sample()
+        windows = self.windows.sample()
+        net_health = self.network.health
+
         rows: list[ProcessUsage] = []
         live_pids: set[int] = set()
 
@@ -45,7 +70,8 @@ class ProcessSampler:
             pid = proc.info["pid"]
             live_pids.add(pid)
             try:
-                if pid not in self._known:
+                first_cpu_sample = pid not in self._known
+                if first_cpu_sample:
                     proc.cpu_percent(None)
                     self._known[pid] = proc
                     cpu = 0.0
@@ -71,19 +97,56 @@ class ProcessSampler:
                     pass
 
                 g = gpu.get(pid)
-                rows.append(ProcessUsage(
-                    pid=pid,
-                    name=name,
-                    cpu_percent=cpu,
-                    ram_mb=ram_mb,
-                    gpu_percent=g.utilization if g else None,
-                    gpu_mem_percent=g.memory_utilization if g else None,
-                    disk_read_mbps=read_rate,
-                    disk_write_mbps=write_rate,
-                    threads=threads,
-                    path=path,
-                    blocked=self.blocklist.path_blocked(path),
-                ))
+                n = network.get(pid)
+                w = windows.get(pid)
+
+                gpu_primary = g.utilization if g else None
+                gpu_secondary = (
+                    g.vendor_utilization
+                    if g and g.source.startswith("Windows GPU Engine")
+                    else None
+                )
+                net_down = n.download_mbps if n else 0.0
+                net_up = n.upload_mbps if n else 0.0
+                lost_for_process = (
+                    net_health.events_lost
+                    if n and (n.sent_bytes > 0 or n.received_bytes > 0)
+                    else 0
+                )
+
+                assessment = assess_counters(
+                    psutil_cpu=cpu,
+                    windows_cpu=None if first_cpu_sample or w is None else w.cpu_percent,
+                    psutil_ram_mb=ram_mb,
+                    windows_ram_mb=w.working_set_mb if w else None,
+                    gpu_primary=gpu_primary,
+                    gpu_secondary=gpu_secondary,
+                    network_events_lost=lost_for_process,
+                )
+
+                rows.append(
+                    ProcessUsage(
+                        pid=pid,
+                        name=name,
+                        cpu_percent=cpu,
+                        ram_mb=ram_mb,
+                        gpu_percent=gpu_primary,
+                        gpu_mem_mb=(
+                            (g.dedicated_mb or 0.0) + (g.shared_mb or 0.0)
+                            if g and (g.dedicated_mb is not None or g.shared_mb is not None)
+                            else None
+                        ),
+                        net_down_mbps=net_down,
+                        net_up_mbps=net_up,
+                        disk_read_mbps=read_rate,
+                        disk_write_mbps=write_rate,
+                        threads=threads,
+                        verification_state=assessment.state,
+                        verification_details=assessment.details,
+                        path=path,
+                        blocked=self.blocklist.path_blocked(path),
+                    )
+                )
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess, OSError):
                 continue
 
@@ -92,3 +155,6 @@ class ProcessSampler:
             self._known.pop(pid, None)
             self._last_io.pop(pid, None)
         return rows
+
+    def close(self) -> None:
+        self.network.close()
