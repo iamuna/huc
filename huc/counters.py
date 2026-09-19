@@ -8,6 +8,8 @@ from dataclasses import dataclass
 class WindowsProcessCounters:
     cpu_percent: float | None = None
     working_set_mb: float | None = None
+    io_read_mbps: float | None = None
+    io_write_mbps: float | None = None
 
 
 class WindowsProcessCounterSampler:
@@ -59,7 +61,8 @@ class WindowsProcessCounterSampler:
         result: dict[int, WindowsProcessCounters] = {}
         try:
             rows = self._service.ExecQuery(
-                f"SELECT IDProcess,PercentProcessorTime,WorkingSet FROM {self._class_name}"
+                "SELECT IDProcess,PercentProcessorTime,WorkingSet,"
+                f"IOReadBytesPersec,IOWriteBytesPersec FROM {self._class_name}"
             )
             for row in rows:
                 try:
@@ -76,7 +79,20 @@ class WindowsProcessCounterSampler:
                     working_set = float(row.WorkingSet) / 1024 / 1024
                 except Exception:
                     working_set = None
-                result[pid] = WindowsProcessCounters(cpu, working_set)
+                try:
+                    io_read = float(row.IOReadBytesPersec) / 1024 / 1024
+                except Exception:
+                    io_read = None
+                try:
+                    io_write = float(row.IOWriteBytesPersec) / 1024 / 1024
+                except Exception:
+                    io_write = None
+                result[pid] = WindowsProcessCounters(
+                    cpu_percent=cpu,
+                    working_set_mb=working_set,
+                    io_read_mbps=io_read,
+                    io_write_mbps=io_write,
+                )
         except Exception as exc:
             self._error = f"WMI process sample failed: {exc}"
         return result
@@ -90,7 +106,13 @@ class CounterAssessment:
     checks: int
 
 
-def relative_mismatch(a: float | None, b: float | None, *, absolute_floor: float, relative_limit: float) -> bool:
+def relative_mismatch(
+    a: float | None,
+    b: float | None,
+    *,
+    absolute_floor: float,
+    relative_limit: float,
+) -> bool:
     if a is None or b is None:
         return False
     delta = abs(a - b)
@@ -106,6 +128,10 @@ def assess_counters(
     windows_ram_mb: float | None,
     gpu_primary: float | None,
     gpu_secondary: float | None,
+    psutil_io_read_mbps: float | None = None,
+    windows_io_read_mbps: float | None = None,
+    psutil_io_write_mbps: float | None = None,
+    windows_io_write_mbps: float | None = None,
     network_events_lost: int = 0,
 ) -> CounterAssessment:
     issues: list[str] = []
@@ -114,17 +140,59 @@ def assess_counters(
     if windows_cpu is not None:
         checks += 1
         if relative_mismatch(psutil_cpu, windows_cpu, absolute_floor=15.0, relative_limit=0.45):
-            issues.append(f"CPU disagreement psutil={psutil_cpu:.1f}% Windows={windows_cpu:.1f}%")
+            issues.append(
+                f"CPU disagreement psutil={psutil_cpu:.1f}% Windows={windows_cpu:.1f}%"
+            )
 
     if windows_ram_mb is not None:
         checks += 1
-        if relative_mismatch(psutil_ram_mb, windows_ram_mb, absolute_floor=64.0, relative_limit=0.20):
-            issues.append(f"RAM disagreement psutil={psutil_ram_mb:.0f}MB Windows={windows_ram_mb:.0f}MB")
+        if relative_mismatch(
+            psutil_ram_mb,
+            windows_ram_mb,
+            absolute_floor=64.0,
+            relative_limit=0.20,
+        ):
+            issues.append(
+                f"RAM disagreement psutil={psutil_ram_mb:.0f}MB Windows={windows_ram_mb:.0f}MB"
+            )
 
     if gpu_primary is not None and gpu_secondary is not None:
         checks += 1
-        if relative_mismatch(gpu_primary, gpu_secondary, absolute_floor=20.0, relative_limit=0.50):
-            issues.append(f"GPU disagreement Windows={gpu_primary:.0f}% vendor={gpu_secondary:.0f}%")
+        if relative_mismatch(
+            gpu_primary,
+            gpu_secondary,
+            absolute_floor=20.0,
+            relative_limit=0.50,
+        ):
+            issues.append(
+                f"GPU disagreement Windows={gpu_primary:.0f}% vendor={gpu_secondary:.0f}%"
+            )
+
+    if windows_io_read_mbps is not None and psutil_io_read_mbps is not None:
+        checks += 1
+        if relative_mismatch(
+            psutil_io_read_mbps,
+            windows_io_read_mbps,
+            absolute_floor=1.0,
+            relative_limit=0.60,
+        ):
+            issues.append(
+                f"I/O read disagreement psutil={psutil_io_read_mbps:.2f}MB/s "
+                f"Windows={windows_io_read_mbps:.2f}MB/s"
+            )
+
+    if windows_io_write_mbps is not None and psutil_io_write_mbps is not None:
+        checks += 1
+        if relative_mismatch(
+            psutil_io_write_mbps,
+            windows_io_write_mbps,
+            absolute_floor=1.0,
+            relative_limit=0.60,
+        ):
+            issues.append(
+                f"I/O write disagreement psutil={psutil_io_write_mbps:.2f}MB/s "
+                f"Windows={windows_io_write_mbps:.2f}MB/s"
+            )
 
     if network_events_lost > 0:
         checks += 1
@@ -133,5 +201,15 @@ def assess_counters(
     if issues:
         return CounterAssessment("CHECK", "; ".join(issues), len(issues), checks)
     if checks:
-        return CounterAssessment("OK", "Independent counters agree within tolerance.", 0, checks)
-    return CounterAssessment("LIMITED", "Not enough independent counters are available to verify this process.", 0, 0)
+        return CounterAssessment(
+            "OK",
+            "Independent counters agree within tolerance.",
+            0,
+            checks,
+        )
+    return CounterAssessment(
+        "LIMITED",
+        "Not enough independent counters are available to verify this process.",
+        0,
+        0,
+    )
