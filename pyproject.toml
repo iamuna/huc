@@ -4,10 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "huc"
-version = "0.1.0"
-description = "Windows-first per-process hardware monitor and persistent executable blocklist"
+version = "0.2.0"
+description = "Windows-first per-process hardware/network monitor with counter cross-checking and executable blocking"
 requires-python = ">=3.11"
-dependencies = ["psutil>=6.0,<8"]
+dependencies = [
+    "psutil>=6.0,<8",
+    "pywin32>=306; platform_system=='Windows'",
+    "pyetwkit>=3.1,<4; platform_system=='Windows'",
+]
 
 [project.scripts]
 huc = "huc.app:main"
