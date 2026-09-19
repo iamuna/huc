@@ -24,6 +24,10 @@ def test_counter_assessment_ok() -> None:
         windows_ram_mb=990.0,
         gpu_primary=40.0,
         gpu_secondary=42.0,
+        psutil_io_read_mbps=5.0,
+        windows_io_read_mbps=5.2,
+        psutil_io_write_mbps=2.0,
+        windows_io_write_mbps=2.1,
     )
     assert result.state == "OK"
     assert result.mismatches == 0
@@ -37,13 +41,19 @@ def test_counter_assessment_flags_large_disagreement() -> None:
         windows_ram_mb=900.0,
         gpu_primary=10.0,
         gpu_secondary=95.0,
+        psutil_io_read_mbps=1.0,
+        windows_io_read_mbps=20.0,
+        psutil_io_write_mbps=0.5,
+        windows_io_write_mbps=12.0,
         network_events_lost=3,
     )
     assert result.state == "CHECK"
-    assert result.mismatches == 4
+    assert result.mismatches == 6
     assert "CPU disagreement" in result.details
     assert "RAM disagreement" in result.details
     assert "GPU disagreement" in result.details
+    assert "I/O read disagreement" in result.details
+    assert "I/O write disagreement" in result.details
     assert "ETW lost" in result.details
 
 
