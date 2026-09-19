@@ -4,7 +4,7 @@ HUC is a Windows-first local process monitor, hardware/network telemetry viewer,
 
 ## v0.2
 
-- Live per-process CPU %, RAM MB, disk read/write MB/s and thread count
+- Live per-process CPU %, RAM MB, process I/O read/write MB/s and thread count
 - Vendor-neutral Windows GPU Engine monitoring for AMD, Intel, and NVIDIA
 - NVIDIA `nvidia-smi` cross-check when available
 - Per-process TCP/UDP upload and download rates from Windows ETW
@@ -71,6 +71,7 @@ HUC compares independent sources where possible:
 
 - CPU: `psutil` process time vs Windows formatted process counters
 - RAM: `psutil` resident working set vs Windows working-set counters
+- Process I/O: `psutil` I/O counters vs Windows formatted process I/O counters
 - GPU: Windows GPU Engine vs NVIDIA vendor counters when available
 - Network integrity: ETW event/buffer loss state
 
