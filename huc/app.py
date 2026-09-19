@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
@@ -19,8 +18,8 @@ class HucApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("HUC — Hardware Usage Controller")
-        self.geometry("1320x760")
-        self.minsize(980, 560)
+        self.geometry("1660x820")
+        self.minsize(1100, 620)
 
         self.blocklist = BlockList()
         self.sampler = ProcessSampler(self.blocklist)
@@ -31,6 +30,7 @@ class HucApp(tk.Tk):
         self.status_var = tk.StringVar(value="Starting…")
         self._refresh_job: str | None = None
 
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
         self._build_ui()
         self.after(150, self.refresh)
 
@@ -48,17 +48,43 @@ class HucApp(tk.Tk):
         frame = ttk.Frame(self)
         frame.pack(fill="both", expand=True, padx=10)
 
-        columns = ("pid", "name", "cpu", "ram", "gpu", "gpumem", "read", "write", "threads", "blocked", "path")
+        columns = (
+            "pid", "name", "cpu", "ram", "gpu", "gpumem",
+            "netdown", "netup", "read", "write", "threads",
+            "verify", "blocked", "path",
+        )
         self.tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
         labels = {
-            "pid": "PID", "name": "Process", "cpu": "CPU %", "ram": "RAM MB",
-            "gpu": "GPU %", "gpumem": "GPU Mem %", "read": "Disk R MB/s",
-            "write": "Disk W MB/s", "threads": "Threads", "blocked": "Blocked",
+            "pid": "PID",
+            "name": "Process",
+            "cpu": "CPU %",
+            "ram": "RAM MB",
+            "gpu": "GPU %",
+            "gpumem": "GPU Mem MB",
+            "netdown": "Net ↓ MB/s",
+            "netup": "Net ↑ MB/s",
+            "read": "Disk R MB/s",
+            "write": "Disk W MB/s",
+            "threads": "Threads",
+            "verify": "Counters",
+            "blocked": "Blocked",
             "path": "Executable path",
         }
         widths = {
-            "pid": 70, "name": 170, "cpu": 80, "ram": 95, "gpu": 80, "gpumem": 95,
-            "read": 105, "write": 105, "threads": 70, "blocked": 70, "path": 420,
+            "pid": 70,
+            "name": 170,
+            "cpu": 75,
+            "ram": 95,
+            "gpu": 75,
+            "gpumem": 105,
+            "netdown": 105,
+            "netup": 105,
+            "read": 105,
+            "write": 105,
+            "threads": 70,
+            "verify": 85,
+            "blocked": 70,
+            "path": 420,
         }
         for col in columns:
             self.tree.heading(col, text=labels[col], command=lambda c=col: self.sort_by(c))
@@ -66,7 +92,7 @@ class HucApp(tk.Tk):
                 col,
                 width=widths[col],
                 minwidth=55,
-                anchor="w" if col in {"name", "path"} else "e",
+                anchor="w" if col in {"name", "path", "verify"} else "e",
             )
 
         yscroll = ttk.Scrollbar(frame, orient="vertical", command=self.tree.yview)
@@ -84,13 +110,14 @@ class HucApp(tk.Tk):
         ttk.Button(actions, text="End process", command=self.kill_selected).pack(side="left", padx=(0, 8))
         ttk.Button(actions, text="BAN executable", command=self.ban_selected).pack(side="left", padx=(0, 8))
         ttk.Button(actions, text="Unban executable", command=self.unban_selected).pack(side="left", padx=(0, 8))
+        ttk.Button(actions, text="Counter check", command=self.show_counter_check).pack(side="left", padx=(0, 8))
         ttk.Button(actions, text="Show blocked", command=self.show_blocked).pack(side="left", padx=(0, 8))
         ttk.Button(actions, text="Uninstall HUC…", command=self.uninstall_huc).pack(side="left")
         ttk.Label(actions, textvariable=self.status_var).pack(side="right")
 
         note = (
-            "BAN stores executable path + SHA-256. HUC Guard terminates matching launches. "
-            "Protected Windows processes cannot be banned."
+            "Counters: OK = independent sources agree; CHECK = meaningful disagreement/loss; "
+            "LIMITED = not enough independent sources. ETW network monitoring may require elevation."
         )
         ttk.Label(self, text=note, padding=(10, 0, 10, 10)).pack(fill="x")
 
@@ -99,7 +126,7 @@ class HucApp(tk.Tk):
             self.sort_reverse = not self.sort_reverse
         else:
             self.sort_column = col
-            self.sort_reverse = col not in {"name", "path", "blocked"}
+            self.sort_reverse = col not in {"name", "path", "verify", "blocked"}
         self.refresh()
 
     def _sort_value(self, row: ProcessUsage):
@@ -109,10 +136,13 @@ class HucApp(tk.Tk):
             "cpu": row.cpu_percent,
             "ram": row.ram_mb,
             "gpu": -1 if row.gpu_percent is None else row.gpu_percent,
-            "gpumem": -1 if row.gpu_mem_percent is None else row.gpu_mem_percent,
+            "gpumem": -1 if row.gpu_mem_mb is None else row.gpu_mem_mb,
+            "netdown": row.net_down_mbps,
+            "netup": row.net_up_mbps,
             "read": row.disk_read_mbps,
             "write": row.disk_write_mbps,
             "threads": row.threads,
+            "verify": row.verification_state,
             "blocked": row.blocked,
             "path": row.path.lower(),
         }[self.sort_column]
@@ -141,6 +171,7 @@ class HucApp(tk.Tk):
                 if query in row.name.lower()
                 or query in row.path.lower()
                 or query == str(row.pid)
+                or query in row.verification_state.lower()
             ]
         data.sort(key=self._sort_value, reverse=self.sort_reverse)
 
@@ -166,10 +197,13 @@ class HucApp(tk.Tk):
                     f"{row.cpu_percent:.1f}",
                     f"{row.ram_mb:.1f}",
                     "—" if row.gpu_percent is None else f"{row.gpu_percent:.0f}",
-                    "—" if row.gpu_mem_percent is None else f"{row.gpu_mem_percent:.0f}",
+                    "—" if row.gpu_mem_mb is None else f"{row.gpu_mem_mb:.0f}",
+                    f"{row.net_down_mbps:.3f}",
+                    f"{row.net_up_mbps:.3f}",
                     f"{row.disk_read_mbps:.2f}",
                     f"{row.disk_write_mbps:.2f}",
                     row.threads,
+                    row.verification_state,
                     "YES" if row.blocked else "",
                     row.path or "<access denied / system>",
                 ),
@@ -178,9 +212,10 @@ class HucApp(tk.Tk):
                 self.tree.selection_set(iid)
                 self.tree.see(iid)
 
+        checks = sum(1 for row in data if row.verification_state == "CHECK")
         self.status_var.set(
-            f"{len(data)} processes | GPU source: {self.sampler.gpu_source} | "
-            f"{len(self.blocklist.rules())} blocked"
+            f"{len(data)} processes | {checks} counter warning(s) | "
+            f"GPU: {self.sampler.gpu_source} | Net: {self.sampler.network_source}"
         )
         self._refresh_job = self.after(self.REFRESH_MS, self.refresh)
 
@@ -190,6 +225,20 @@ class HucApp(tk.Tk):
             messagebox.showinfo("HUC", "Select a process first.")
             return None
         return self.rows.get(sel[0])
+
+    def show_counter_check(self) -> None:
+        row = self.selected()
+        if not row:
+            return
+        messagebox.showinfo(
+            f"Counter check — {row.name}",
+            f"PID: {row.pid}\n"
+            f"State: {row.verification_state}\n\n"
+            f"{row.verification_details}\n\n"
+            f"GPU source: {self.sampler.gpu_source}\n"
+            f"Network source: {self.sampler.network_source}\n"
+            f"CPU/RAM verification: {self.sampler.verification_source}",
+        )
 
     def locate_selected(self) -> None:
         row = self.selected()
@@ -318,7 +367,19 @@ class HucApp(tk.Tk):
             messagebox.showerror("HUC", f"Could not launch uninstaller: {exc}")
             return
 
-        self.destroy()
+        self.on_close()
+
+    def on_close(self) -> None:
+        if self._refresh_job is not None:
+            try:
+                self.after_cancel(self._refresh_job)
+            except tk.TclError:
+                pass
+            self._refresh_job = None
+        try:
+            self.sampler.close()
+        finally:
+            self.destroy()
 
 
 def main() -> int:
